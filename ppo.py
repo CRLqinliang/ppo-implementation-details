@@ -15,7 +15,9 @@ from torch.utils.tensorboard import SummaryWriter
 
 def parse_args():
     # fmt: off
+    # 定义参数变量池对象：parser
     parser = argparse.ArgumentParser()
+    # parser.add_argument(name = str,type = int/float..,default = 1...,help =")
     parser.add_argument("--exp-name", type=str, default=os.path.basename(__file__).rstrip(".py"),
         help="the name of this experiment")
     parser.add_argument("--gym-id", type=str, default="CartPole-v1",
@@ -76,14 +78,16 @@ def parse_args():
     # fmt: on
     return args
 
-
+# 定义仿真环境。（函数里面定义函数？）
 def make_env(gym_id, seed, idx, capture_video, run_name):
     def thunk():
+        # gym_id 仿真环境名字str, seed随机种子，idx序号， run_name该仿真过程的名字；
         env = gym.make(gym_id)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         if capture_video:
             if idx == 0:
                 env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
+        #定义环境、动作空间、观测空间中的随机种子；
         env.seed(seed)
         env.action_space.seed(seed)
         env.observation_space.seed(seed)
@@ -91,17 +95,20 @@ def make_env(gym_id, seed, idx, capture_video, run_name):
 
     return thunk
 
-
+# 神经网络初始化，利用标准正态分布,标准差为sqrt(2)
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+    # 正交初始化
     torch.nn.init.orthogonal_(layer.weight, std)
+    # 常数初始化。
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
-
+# 定义智能体AC框架组成，从Module继承
 class Agent(nn.Module):
     def __init__(self, envs):
         super(Agent, self).__init__()
         self.critic = nn.Sequential(
+            # prod( )是连乘操作，将里面所有的元素相乘 eg.3x4=12. linear(12,64) 
             layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
             nn.Tanh(),
             layer_init(nn.Linear(64, 64)),
@@ -113,16 +120,20 @@ class Agent(nn.Module):
             nn.Tanh(),
             layer_init(nn.Linear(64, 64)),
             nn.Tanh(),
+            # 这里action_space与observation_space处理不同，可能是因为数据类型原因；
             layer_init(nn.Linear(64, envs.single_action_space.n), std=0.01),
         )
-
+        # 只能查看critic网络的输出结果
     def get_value(self, x):
         return self.critic(x)
-
+        
     def get_action_and_value(self, x, action=None):
+        # logits 为actor输出
         logits = self.actor(x)
+        # 以actor输出层的概率分布定义抽样分布probs
         probs = Categorical(logits=logits)
         if action is None:
+            # 按照这个分布进行采样，得到真实action的分布action.
             action = probs.sample()
         return action, probs.log_prob(action), probs.entropy(), self.critic(x)
 
@@ -132,12 +143,11 @@ if __name__ == "__main__":
     run_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     if args.track:
         import wandb
-
         wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
             sync_tensorboard=True,
-            config=vars(args),
+            config=vars(args), # vars ?
             name=run_name,
             monitor_gym=True,
             save_code=True,
@@ -154,18 +164,23 @@ if __name__ == "__main__":
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
-    device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
-
-    # env setup
+    # env setup 
+    # 同步向量环境
     envs = gym.vector.SyncVectorEnv(
         [make_env(args.gym_id, args.seed + i, i, args.capture_video, run_name) for i in range(args.num_envs)]
     )
+    # po出警告，assert 如果当前envs空间中的动作空间为离散的话就出警告。
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
+    # 有gpu用gpu，没有gpu用cpu.
+    device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    # 定义好agent之后转到cpu或者gpu；
     agent = Agent(envs).to(device)
+    # 定义优化器
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
+    # what happen to this '+'
     obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
     actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape).to(device)
     logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
@@ -176,8 +191,11 @@ if __name__ == "__main__":
     # TRY NOT TO MODIFY: start the game
     global_step = 0
     start_time = time.time()
+    # envs.reset()返回的是下次Obs的随机初始值，这里主要是占位（
     next_obs = torch.Tensor(envs.reset()).to(device)
+    # 这里由于是并行环境，所以需要反馈各个环境的
     next_done = torch.zeros(args.num_envs).to(device)
+    # 更新的次数为总计算次数//batch_size
     num_updates = args.total_timesteps // args.batch_size
 
     for update in range(1, num_updates + 1):
@@ -194,7 +212,9 @@ if __name__ == "__main__":
 
             # ALGO LOGIC: action logic
             with torch.no_grad():
+                # 此时还未优化，仅为赋值，不要求在计算过程中跟踪梯度；
                 action, logprob, _, value = agent.get_action_and_value(next_obs)
+                # values = critic(x)
                 values[step] = value.flatten()
             actions[step] = action
             logprobs[step] = logprob
